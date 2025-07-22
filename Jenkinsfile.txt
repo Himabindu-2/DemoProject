@@ -1,80 +1,67 @@
 #!groovy
 node {
     def BUILD_NUMBER = env.BUILD_NUMBER
-    def RUN_ARTIFACT_DIR="tests/${BUILD_NUMBER}"
-    def SFDC
-    
+    def RUN_ARTIFACT_DIR = "tests/${BUILD_NUMBER}"
+
     def JWT_KEY_CRED_ID = env.JWT_CRED_ID_DH
-    def HUB_ORG1 = env.HUB_ORG_DH1
     def HUB_ORG = env.HUB_ORG_DH
     def SFDC_HOST = env.SFDC_HOST_DH
-    def CONNECTED_APP_CONSUMER_KEY1 = env.CONNECTED_APP_CONSUMER_KEY_DH1
     def CONNECTED_APP_CONSUMER_KEY = env.CONNECTED_APP_CONSUMER_KEY_DH
-    
-    
-
-    println 'KEY IS' 
-    println JWT_KEY_CRED_ID
-    println HUB_ORG
-    println HUB_ORG1
-    println SFDC_HOST
-    println CONNECTED_APP_CONSUMER_KEY
-    println CONNECTED_APP_CONSUMER_KEY1
 
     def toolbelt = tool 'toolbelt'
 
     stage('Checkout Source') {
-        checkout scm // Checks out the code from the main branch for the code changes
+        checkout scm
     }
-           
+
+    def changedFiles = []
+    stage('Identify Changed Metadata') {
+        changedFiles = bat(
+            script: 'git diff-tree --no-commit-id --name-only -r HEAD',
+            returnStdout: true
+        ).trim().split('\r?\n')
+
+        echo "Changed Files: ${changedFiles.join(', ')}"
+
+        // Filter Salesforce metadata components only
+        changedFiles = changedFiles.findAll {
+            it.startsWith("force-app") && !it.endsWith(".xml")
+        }
+
+        if (changedFiles.isEmpty()) {
+            error 'No Salesforce metadata components to deploy.'
+        }
+    }
+
     withCredentials([file(credentialsId: JWT_KEY_CRED_ID, variable: 'jwt_key_file')]) {
-        stage('Authorize ORG1 Org') {
-            echo "JWT Key Credential ID: ${env.JWT_CRED_ID_DH}"
-            echo "Hub Org: ${env.HUB_ORG_DH_1}"
-	    echo "Connected App Consumer Key: ${env.CONNECTED_APP_CONSUMER_KEY_DH1}"
-            echo "SFDC Host: ${env.SFDC_HOST_DH}"
-			 
-            def checkrc = bat returnStatus: true, script: "${toolbelt}sf org login jwt --instance-url ${SFDC_HOST} --client-id ${CONNECTED_APP_CONSUMER_KEY1} --username ${HUB_ORG1} --jwt-key-file ${jwt_key_file} --setalias ORG1"
-            echo "SFDC_HOST: ${SFDC_HOST}"
 
-            // Check for successful authorization of ORG1
-		
+        stage('Authorize DevHub Org') {
+            echo "Using JWT Auth for DevHub"
+            echo "Hub Org: ${HUB_ORG}"
+            echo "Connected App Consumer Key: ${CONNECTED_APP_CONSUMER_KEY}"
+
+            def checkrc = bat returnStatus: true, script: """
+                ${toolbelt}sf org login jwt --instance-url ${SFDC_HOST} --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file %jwt_key_file% --setalias Devhub
+            """.stripIndent()
+
             if (checkrc != 0) {
-                error 'ORG1 org authorization failed'
+                error 'DevHub org authorization failed.'
             } else {
-                echo 'ORG1 org authorized successfully'
+                echo 'DevHub authorized successfully.'
             }
         }
 
-        // Deploying the code to ORG1
-        stage('Push To ORG1') { 
-            def rc = bat returnStatus: true, script: "${toolbelt}sf project deploy start --target-org ORG1" 
-	    if (rc != 0) {
-                error 'Salesforce push to ORG1 org failed.' 
-            } else {
-                echo 'Salesforce push to ORG1 org successful.'   
-            }
-        }	
-            
-	    stage('Authorize DevHub Org') {
-         echo "Hub Org: ${env.HUB_ORG_DH}"
-         echo "Connected App Consumer Key: ${env.CONNECTED_APP_CONSUMER_KEY_DH}"	
-		// Deploying code to ORG1
-            def checkrc = bat returnStatus: true, script: "${toolbelt}sf org login jwt --instance-url ${SFDC_HOST} --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file ${jwt_key_file} --setalias Devhub"
-            
-            // Check for successful authorization of Devhub
-            if (checkrc != 0) {
-                error 'DevHub org authorization failed'
-            } else {
-                echo 'DevHub org authorized successfully'
-            }
-        }
+        stage('Deploy to DevHub') {
+            def fileList = changedFiles.collect { "\"${it}\"" }.join(' ')
+            def deployCmd = "${toolbelt}sf project deploy start --target-org Devhub --source-dir ${fileList} --wait 10 --ignore-warnings"
 
-        // Deploying code to DevHub
-        stage('Push To DevHub') { 
-            def rc = bat returnStatus: true, script: "${toolbelt}sf project deploy start --target-org Devhub" 
+            echo "Deploying changed metadata to DevHub: ${fileList}"
+
+            def rc = bat returnStatus: true, script: deployCmd
             if (rc != 0) {
-                error 'Salesforce push to DevHub org failed.' 
+                error 'Push to DevHub org failed.'
+            } else {
+                echo 'Push to DevHub org successful.'
             }
         }
     }
